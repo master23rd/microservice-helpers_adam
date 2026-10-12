@@ -97,6 +97,9 @@ func NewS3Client(ctx context.Context, cfg helperconfig.S3Config) (S3Client, erro
 // removeGCSAcceptEncoding strips Accept-Encoding before SigV4 signing; GCS's XML API
 // rejects requests that include it among the signed headers.
 func (s *s3Wrapper) removeGCSAcceptEncoding(stack *middleware.Stack) error {
+	if _, ok := stack.Finalize.Get("Signing"); !ok {
+		return nil
+	}
 	return stack.Finalize.Insert(middleware.FinalizeMiddlewareFunc(
 		"GCSRemoveAcceptEncoding",
 		func(ctx context.Context, input middleware.FinalizeInput, next middleware.FinalizeHandler) (
