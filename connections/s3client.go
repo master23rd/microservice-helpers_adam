@@ -3,11 +3,17 @@ package connections
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,12 +34,14 @@ import (
 const gcsEndpoint = "https://storage.googleapis.com"
 
 type s3Wrapper struct {
-	client   *s3.Client
-	bucket   string
-	provider helperconfig.S3Provider
-	root     string // local storage root
-	pathURL  string
-	mu       sync.RWMutex
+	client          *s3.Client
+	bucket          string
+	provider        helperconfig.S3Provider
+	root            string // local storage root
+	pathURL         string
+	accessKeyID     string // HMAC key id, needed for GCS native V4 signing
+	secretAccessKey string // HMAC secret, needed for GCS native V4 signing
+	mu              sync.RWMutex
 }
 
 func safeLocalPath(root, key string) (string, error) {
@@ -75,7 +83,13 @@ func NewS3Client(ctx context.Context, cfg helperconfig.S3Config) (S3Client, erro
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
 
-	w := &s3Wrapper{bucket: cfg.BucketName, provider: cfg.Provider, pathURL: "/images"}
+	w := &s3Wrapper{
+		bucket:          cfg.BucketName,
+		provider:        cfg.Provider,
+		pathURL:         "/images",
+		accessKeyID:     cfg.AccessKeyID,
+		secretAccessKey: cfg.SecretAccessKey,
+	}
 
 	if endpoint != "" {
 		w.client = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
@@ -262,6 +276,9 @@ func (s *s3Wrapper) GetFileURL(ctx context.Context, key string, expiration time.
 		host := os.Getenv("HOST")
 		return host + s.GetPathURL() + "?to=" + key, nil
 	}
+	if s.provider == helperconfig.S3ProviderGCS {
+		return s.signGCSURLV4(key, expiration)
+	}
 	presignClient := s3.NewPresignClient(s.client)
 	result, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket), Key: aws.String(key),
@@ -270,6 +287,118 @@ func (s *s3Wrapper) GetFileURL(ctx context.Context, key string, expiration time.
 		return "", fmt.Errorf("presign URL: %w", err)
 	}
 	return result.URL, nil
+}
+
+// gcsMinExpiry and gcsMaxExpiry are GCS's accepted bounds for V4 signed URLs.
+// https://cloud.google.com/storage/docs/access-control/signed-urls-v4
+const (
+	gcsMinExpiry = 1 * time.Second
+	gcsMaxExpiry = 604800 * time.Second
+)
+
+// signGCSURLV4 builds a GCS V4 signed URL using HMAC credentials (access key
+// id / secret), without requiring a service-account JSON key. The AWS SDK's
+// presigner cannot be reused here: GCS's XML API rejects the SigV4-style
+// epoch "Expires" param it produces, requiring the duration-based
+// "X-Goog-Expires" param instead. See:
+// https://cloud.google.com/storage/docs/access-control/signed-urls-v4
+func (s *s3Wrapper) signGCSURLV4(key string, expiration time.Duration) (string, error) {
+	if expiration < gcsMinExpiry {
+		expiration = gcsMinExpiry
+	} else if expiration > gcsMaxExpiry {
+		expiration = gcsMaxExpiry
+	}
+
+	now := time.Now().UTC()
+	dateStamp := now.Format("20060102")
+	amzDate := now.Format("20060102T150405Z")
+	credentialScope := fmt.Sprintf("%s/auto/storage/goog4_request", dateStamp)
+	credential := fmt.Sprintf("%s/%s", s.accessKeyID, credentialScope)
+
+	host := "storage.googleapis.com"
+	canonicalURI := "/" + s.bucket + "/" + key
+
+	query := url.Values{}
+	query.Set("X-Goog-Algorithm", "GOOG4-HMAC-SHA256")
+	query.Set("X-Goog-Credential", credential)
+	query.Set("X-Goog-Date", amzDate)
+	query.Set("X-Goog-Expires", strconv.Itoa(int(expiration.Seconds())))
+	query.Set("X-Goog-SignedHeaders", "host")
+
+	canonicalQueryString := encodeCanonicalQuery(query)
+	canonicalHeaders := "host:" + host + "\n"
+	signedHeaders := "host"
+	canonicalRequest := strings.Join([]string{
+		"GET",
+		canonicalURI,
+		canonicalQueryString,
+		canonicalHeaders,
+		signedHeaders,
+		"UNSIGNED-PAYLOAD",
+	}, "\n")
+
+	hashedCanonicalRequest := sha256.Sum256([]byte(canonicalRequest))
+	stringToSign := strings.Join([]string{
+		"GOOG4-HMAC-SHA256",
+		amzDate,
+		credentialScope,
+		hex.EncodeToString(hashedCanonicalRequest[:]),
+	}, "\n")
+
+	signingKey := gcsSigningKey(s.secretAccessKey, dateStamp)
+	signature := hmac.New(sha256.New, signingKey)
+	signature.Write([]byte(stringToSign))
+	query.Set("X-Goog-Signature", hex.EncodeToString(signature.Sum(nil)))
+
+	u := url.URL{
+		Scheme:   "https",
+		Host:     host,
+		Path:     canonicalURI,
+		RawQuery: encodeCanonicalQuery(query),
+	}
+	return u.String(), nil
+}
+
+// gcsSigningKey derives the GOOG4 signing key, mirroring AWS SigV4's derived
+// key chain but with the "GOOG4" prefix and a fixed "storage"/"goog4_request"
+// scope, per the GCS V4 signing spec.
+func gcsSigningKey(secret, dateStamp string) []byte {
+	h := func(key, data []byte) []byte {
+		mac := hmac.New(sha256.New, key)
+		mac.Write(data)
+		return mac.Sum(nil)
+	}
+	kDate := h([]byte("GOOG4"+secret), []byte(dateStamp))
+	kRegion := h(kDate, []byte("auto"))
+	kService := h(kRegion, []byte("storage"))
+	return h(kService, []byte("goog4_request"))
+}
+
+// encodeCanonicalQuery renders query params sorted by key with RFC 3986
+// percent-encoding, as required by the canonical request format.
+func encodeCanonicalQuery(q url.Values) string {
+	keys := make([]string, 0, len(q))
+	for k := range q {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var buf bytes.Buffer
+	for i, k := range keys {
+		if i > 0 {
+			buf.WriteByte('&')
+		}
+		buf.WriteString(rfc3986Escape(k))
+		buf.WriteByte('=')
+		buf.WriteString(rfc3986Escape(q.Get(k)))
+	}
+	return buf.String()
+}
+
+// rfc3986Escape percent-encodes like url.QueryEscape but keeps spaces as
+// "%20" instead of "+", matching the RFC 3986 encoding GCS/AWS signing
+// requires for canonical query strings.
+func rfc3986Escape(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 
 func (s *s3Wrapper) GetFileExtension(key string) string { return filepath.Ext(key) }
