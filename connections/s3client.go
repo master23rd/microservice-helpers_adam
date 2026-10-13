@@ -41,6 +41,7 @@ type s3Wrapper struct {
 	pathURL         string
 	accessKeyID     string // HMAC key id, needed for GCS native V4 signing
 	secretAccessKey string // HMAC secret, needed for GCS native V4 signing
+	endpoint        string // resolved endpoint (incl. GCS default), needed for GCS native V4 signing
 	mu              sync.RWMutex
 }
 
@@ -89,6 +90,7 @@ func NewS3Client(ctx context.Context, cfg helperconfig.S3Config) (S3Client, erro
 		pathURL:         "/images",
 		accessKeyID:     cfg.AccessKeyID,
 		secretAccessKey: cfg.SecretAccessKey,
+		endpoint:        endpoint,
 	}
 
 	if endpoint != "" {
@@ -315,7 +317,12 @@ func (s *s3Wrapper) signGCSURLV4(key string, expiration time.Duration) (string, 
 	credentialScope := fmt.Sprintf("%s/auto/storage/goog4_request", dateStamp)
 	credential := fmt.Sprintf("%s/%s", s.accessKeyID, credentialScope)
 
-	host := "storage.googleapis.com"
+	scheme, host := "https", "storage.googleapis.com"
+	if s.endpoint != "" {
+		if u, err := url.Parse(s.endpoint); err == nil && u.Host != "" {
+			scheme, host = u.Scheme, u.Host
+		}
+	}
 	canonicalURI := "/" + s.bucket + "/" + key
 
 	query := url.Values{}
@@ -351,7 +358,7 @@ func (s *s3Wrapper) signGCSURLV4(key string, expiration time.Duration) (string, 
 	query.Set("X-Goog-Signature", hex.EncodeToString(signature.Sum(nil)))
 
 	u := url.URL{
-		Scheme:   "https",
+		Scheme:   scheme,
 		Host:     host,
 		Path:     canonicalURI,
 		RawQuery: encodeCanonicalQuery(query),

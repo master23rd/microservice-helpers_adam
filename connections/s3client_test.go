@@ -87,6 +87,57 @@ func TestGetFileURLGCSClampsExpiration(t *testing.T) {
 	}
 }
 
+func TestGetFileURLGCSSignsWithCustomEndpointHost(t *testing.T) {
+	c, err := NewS3Client(context.Background(), helperconfig.S3Config{
+		Provider:        helperconfig.S3ProviderGCS,
+		BucketName:      "my-bucket",
+		AccessKeyID:     "GOOGACCESSKEY",
+		SecretAccessKey: "secret",
+		Endpoint:        "http://localhost:4443",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	got, err := c.GetFileURL(context.Background(), "docs/report.pdf", 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("GetFileURL returned invalid URL: %v", err)
+	}
+	if u.Scheme != "http" || u.Host != "localhost:4443" {
+		t.Fatalf("signed URL host = %s://%s, want http://localhost:4443 (must follow configured endpoint, not a hardcoded host)", u.Scheme, u.Host)
+	}
+}
+
+func TestGetFileURLGCSDefaultEndpointStillUsesGoogleHost(t *testing.T) {
+	c, err := NewS3Client(context.Background(), helperconfig.S3Config{
+		Provider:        helperconfig.S3ProviderGCS,
+		BucketName:      "my-bucket",
+		AccessKeyID:     "GOOGACCESSKEY",
+		SecretAccessKey: "secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	got, err := c.GetFileURL(context.Background(), "docs/report.pdf", 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Host != "storage.googleapis.com" {
+		t.Fatalf("signed URL host = %s, want storage.googleapis.com when endpoint is unset", u.Host)
+	}
+}
+
 func TestGetFileURLS3StillUsesAWSPresign(t *testing.T) {
 	c, err := NewS3Client(context.Background(), helperconfig.S3Config{
 		Provider:        helperconfig.S3ProviderAWS,
