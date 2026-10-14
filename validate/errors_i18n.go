@@ -129,6 +129,14 @@ func leafOf(field string) string {
 	return path[len(path)-1]
 }
 
+// CollectFieldErrors exposes the internal field-error normalization so
+// callers (e.g. web.ValidationErrorResponseWithRef) can log field/rule/param
+// detail without duplicating the validator.ValidationErrors / AppValidationError
+// type-switch. Returns nil for nil, unrecognized, or non-field-level errors.
+func CollectFieldErrors(err error) []FieldError {
+	return collectFieldErrors(err)
+}
+
 // FormatValidationErrorData builds the nested {field: message} map for the
 // 422 response "data" key, translated to lang ("en"/"id"). Unknown or
 // non-validation errors yield an empty map — raw details never leak.
