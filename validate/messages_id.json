@@ -19,5 +19,6 @@
   "file_type_not_allowed": "{0} harus salah satu dari tipe berikut: {1}",
   "file_read_error": "{0} tidak dapat dibaca",
   "_error": "{0} tidak valid",
-  "invalid_input": "Data masukan tidak valid"
+  "invalid_input": "Data masukan tidak valid",
+  "payload_too_large": "Ukuran body permintaan melebihi batas {1}MB"
 }

@@ -3,7 +3,10 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -79,6 +82,70 @@ func TestValidationErrorResponseNilError(t *testing.T) {
 	ValidationErrorResponse(ctx, nil)
 	if rec.Code != ValidationError {
 		t.Fatalf("code %d", rec.Code)
+	}
+}
+
+func TestIsMaxBytesErrorDetectsOverflow(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/", strings.NewReader("0123456789"))
+	req.Body = http.MaxBytesReader(rec, io.NopCloser(req.Body), 5)
+	_, err := io.ReadAll(req.Body)
+	if !IsMaxBytesError(err) {
+		t.Fatalf("expected MaxBytesError, got %v (%T)", err, err)
+	}
+}
+
+func TestIsMaxBytesErrorFalseForOtherErrors(t *testing.T) {
+	if IsMaxBytesError(errors.New("boom")) {
+		t.Fatal("expected false for unrelated error")
+	}
+}
+
+func TestPayloadTooLargeResponseNamesLimit(t *testing.T) {
+	ctx, rec := newValidationCtx(t, "en")
+	PayloadTooLargeResponse(ctx, 50*1024*1024)
+	if rec.Code != PayloadTooLarge {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if !ctx.IsAborted() {
+		t.Fatal("expected abort")
+	}
+	var body ResponseDefault
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status {
+		t.Fatal("status must be false")
+	}
+	if !containsAny(body.Message, "50") {
+		t.Errorf("message must mention the limit, got %q", body.Message)
+	}
+}
+
+func TestPayloadTooLargeResponseIndonesian(t *testing.T) {
+	ctx, rec := newValidationCtx(t, "id")
+	PayloadTooLargeResponse(ctx, 5*1024*1024)
+	var body ResponseDefault
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.Message != "Ukuran body permintaan melebihi batas 5MB" {
+		t.Errorf("got %q", body.Message)
+	}
+}
+
+func TestValidationErrorResponseWithRefRoutesMaxBytesErrorTo413(t *testing.T) {
+	ctx, rec := newValidationCtx(t, "en")
+	rec2 := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/", strings.NewReader("0123456789"))
+	req.Body = http.MaxBytesReader(rec2, io.NopCloser(req.Body), 5)
+	_, readErr := io.ReadAll(req.Body)
+	ValidationErrorResponseWithRef(ctx, readErr, nil)
+	if rec.Code != PayloadTooLarge {
+		t.Fatalf("code %d, want 413", rec.Code)
+	}
+	var body ResponseDefault
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if !containsAny(body.Message, "MB") {
+		t.Errorf("expected limit message, got %q", body.Message)
 	}
 }
 

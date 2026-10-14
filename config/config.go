@@ -71,6 +71,10 @@ type S3Config struct {
 	LocalPath       string     `toml:"local_path"`
 }
 
+// DefaultMaxUploadSizeMB is the request body size limit used when
+// AppConfig.MaxUploadSizeMB is unset (0 or negative).
+const DefaultMaxUploadSizeMB = 50
+
 type AppConfig struct {
 	AppKey string `toml:"app_key"`
 	// LegacyAppKey is the e-IPO (PHP) secretKey used for data encrypted outside
@@ -85,6 +89,19 @@ type AppConfig struct {
 	ValidateOverKsei bool   `toml:"validate_over_ksei"`
 	MFAUserTypes     []int  `toml:"mfa_user_types"`
 	FrontendURL      string `toml:"frontend_url"`
+	// MaxUploadSizeMB caps the request body size (http.MaxBytesReader) in MB.
+	// 0 or unset falls back to DefaultMaxUploadSizeMB via MaxUploadBytes.
+	MaxUploadSizeMB int `toml:"max_upload_size_mb"`
+}
+
+// MaxUploadBytes returns the configured max request body size in bytes,
+// defaulting to DefaultMaxUploadSizeMB when MaxUploadSizeMB is unset or <= 0.
+func (c AppConfig) MaxUploadBytes() int64 {
+	mb := c.MaxUploadSizeMB
+	if mb <= 0 {
+		mb = DefaultMaxUploadSizeMB
+	}
+	return int64(mb) * 1024 * 1024
 }
 
 type MongoDBConfig struct {

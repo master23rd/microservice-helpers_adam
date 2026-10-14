@@ -19,5 +19,6 @@
   "file_type_not_allowed": "{0} must be one of the following types: {1}",
   "file_read_error": "{0} could not be read",
   "_error": "{0} is invalid",
-  "invalid_input": "Invalid input data"
+  "invalid_input": "Invalid input data",
+  "payload_too_large": "Request body exceeds the {1}MB limit"
 }

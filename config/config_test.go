@@ -42,6 +42,20 @@ enabled = true
 	}
 }
 
+func TestAppConfigMaxUploadBytesDefaultsTo50MB(t *testing.T) {
+	var cfg AppConfig
+	if got := cfg.MaxUploadBytes(); got != 50*1024*1024 {
+		t.Fatalf("MaxUploadBytes() = %d, want 50MB", got)
+	}
+}
+
+func TestAppConfigMaxUploadBytesUsesConfiguredValue(t *testing.T) {
+	cfg := AppConfig{MaxUploadSizeMB: 5}
+	if got := cfg.MaxUploadBytes(); got != 5*1024*1024 {
+		t.Fatalf("MaxUploadBytes() = %d, want 5MB", got)
+	}
+}
+
 func TestMainConfigMissingOptionalSectionsUseZeroValues(t *testing.T) {
 	var cfg MainConfig
 	if _, err := toml.Decode("[app]\notp_issuer='E-IPO'", &cfg); err != nil {

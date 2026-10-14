@@ -1,7 +1,10 @@
 package web
 
 import (
+	"errors"
 	"log"
+	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -20,6 +23,7 @@ const (
 	MethodNotAllowed    = 405
 	Conflict            = 409
 	ValidationError     = 422
+	PayloadTooLarge     = 413
 	TooManyRequest      = 429
 	InternalServerError = 500
 	ServiceBroken       = 502
@@ -75,8 +79,14 @@ func ValidationErrorResponse(ctx *gin.Context, err error) {
 
 // ValidationErrorResponseWithRef is ValidationErrorResponse with the bound
 // request struct as ref, so field paths honour its json/form tags and
-// embedded-struct flattening.
+// embedded-struct flattening. A body cut short by http.MaxBytesReader
+// (err wraps *http.MaxBytesError) is reported as 413 naming the limit,
+// instead of falling into the generic 422 "Invalid input data".
 func ValidationErrorResponseWithRef(ctx *gin.Context, err error, ref any) {
+	if maxBytesLimit, ok := maxBytesLimitFromError(err); ok {
+		PayloadTooLargeResponse(ctx, maxBytesLimit)
+		return
+	}
 	lang := GetLanguageCtx(ctx)
 	data := validate.FormatValidationErrorDataWithRef(err, lang, ref)
 	logValidationError(ctx, err)
@@ -86,6 +96,37 @@ func ValidationErrorResponseWithRef(ctx *gin.Context, err error, ref any) {
 		Data:    data,
 		Message: validate.FormatValidationSummary(err, lang),
 	})
+	ctx.Abort()
+}
+
+// maxBytesLimitFromError reports the configured limit when err wraps
+// *http.MaxBytesError, so callers can send PayloadTooLargeResponse instead
+// of the generic validation-error fallback.
+func maxBytesLimitFromError(err error) (int64, bool) {
+	var maxBytesErr *http.MaxBytesError
+	if !errors.As(err, &maxBytesErr) {
+		return 0, false
+	}
+	return maxBytesErr.Limit, true
+}
+
+// IsMaxBytesError reports whether err (or its cause) is the stdlib
+// http.MaxBytesReader overflow error, so callers can tell a too-large
+// request body apart from an ordinary bind/validation failure.
+func IsMaxBytesError(err error) bool {
+	_, ok := maxBytesLimitFromError(err)
+	return ok
+}
+
+// PayloadTooLargeResponse sends a 413 naming the configured limit in MB, for
+// requests whose body was cut short by http.MaxBytesReader. limitBytes is
+// the limit that was configured on the reader.
+func PayloadTooLargeResponse(ctx *gin.Context, limitBytes int64) {
+	lang := GetLanguageCtx(ctx)
+	limitMB := strconv.FormatFloat(float64(limitBytes)/(1024*1024), 'f', -1, 64)
+	message := validate.Translate("payload_too_large", lang, "", limitMB)
+	logErrorResponse(ctx, PayloadTooLarge, message)
+	SendResponse(ctx, ResponseDefault{Status: false, Code: PayloadTooLarge, Data: nil, Message: message})
 	ctx.Abort()
 }
 
