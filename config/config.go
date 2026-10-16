@@ -17,13 +17,20 @@ const (
 	S3ProviderGCS   S3Provider = "gcs"
 )
 
+type SftpSourceConfig struct {
+	Dir            string `toml:"dir"`
+	FilePattern    string `toml:"file_pattern"`
+	ControlPattern string `toml:"control_pattern"`
+}
+
 type SftpConfig struct {
-	Host           string `toml:"host"`
-	Port           int    `toml:"port"`
-	User           string `toml:"user"`
-	Password       string `toml:"password"`
-	KnownHostsFile string `toml:"known_hosts_file"`
-	HostKey        string `toml:"host_key"`
+	Host           string                      `toml:"host"`
+	Port           int                         `toml:"port"`
+	User           string                      `toml:"user"`
+	Password       string                      `toml:"password"`
+	KnownHostsFile string                      `toml:"known_hosts_file"`
+	HostKey        string                      `toml:"host_key"`
+	Sources        map[string]SftpSourceConfig `toml:"sources"`
 }
 
 type GPubSubConfig struct {
