@@ -3,6 +3,7 @@ package activity
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +48,9 @@ func EnrichActivityEvent(event *pubsubtypes.ActivityEvent, defaultProducer ...st
 	if event.Metadata != nil && *event.Metadata != "" {
 		_ = json.Unmarshal([]byte(*event.Metadata), &meta)
 	}
+	if meta == nil {
+		meta = make(map[string]any)
+	}
 
 	if MetaString(meta, "event_id") == "" {
 		meta["event_id"] = uuid.New().String()
@@ -83,15 +87,61 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 	if event.Metadata != nil && *event.Metadata != "" {
 		_ = json.Unmarshal([]byte(*event.Metadata), &meta)
 	}
+	if meta == nil {
+		meta = make(map[string]any)
+	}
+
+	occurredAt := MetaString(meta, "occurred_at")
 
 	createdAt := event.CreatedAt
+	if createdAt.IsZero() {
+		if occurredAt != "" {
+			if t, err := time.Parse(time.RFC3339Nano, occurredAt); err == nil {
+				createdAt = t
+			} else if t, err := time.Parse(time.RFC3339, occurredAt); err == nil {
+				createdAt = t
+			}
+		}
+	}
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
 
+	if occurredAt == "" {
+		occurredAt = createdAt.UTC().Format(time.RFC3339Nano)
+	}
+
 	eventID := MetaString(meta, "event_id")
 	if eventID == "" {
-		eventID = uuid.New().String()
+		// When an occurrence-specific timestamp is available (from event.CreatedAt,
+		// meta["occurred_at"], or meta["timestamp"]), derive a deterministic UUIDv5 (SHA-1)
+		// so that redeliveries of that specific occurrence produce identical deduplication keys,
+		// while different occurrences at different times receive distinct IDs.
+		var timeKey string
+		if !event.CreatedAt.IsZero() {
+			timeKey = strconv.FormatInt(event.CreatedAt.UTC().UnixNano(), 10)
+		} else if occ := MetaString(meta, "occurred_at"); occ != "" {
+			timeKey = occ
+		} else if ts := MetaString(meta, "timestamp"); ts != "" {
+			timeKey = ts
+		}
+
+		if timeKey != "" {
+			identity := fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+				event.Category,
+				event.Subcategory,
+				event.UserID,
+				timeKey,
+				event.Message,
+				event.IPAddress,
+			)
+			eventID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()
+		} else {
+			// When no occurrence-specific identifier or timestamp exists, avoid
+			// deterministic deduplication so distinct occurrences (such as recurring
+			// heartbeats or repeated actions) receive unique IDs and are not discarded.
+			eventID = uuid.New().String()
+		}
 	}
 
 	ipAddress := event.IPAddress
@@ -197,12 +247,22 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 	// (e.g. action_url, diff, custom params) remain.
 	sanitizedMeta := sanitizeMetadata(meta)
 
-	return map[string]any{
+	eventType := MetaString(meta, "event_type")
+	if eventType == "" {
+		eventType = fmt.Sprintf("%s.%s", event.Category, event.Subcategory)
+	}
+
+	schemaVersion := MetaString(meta, "schema_version")
+	if schemaVersion == "" {
+		schemaVersion = ActivitySchemaVersion
+	}
+
+	doc := map[string]any{
 		"event_id":       eventID,
-		"occurred_at":    createdAt.UTC().Format(time.RFC3339Nano),
+		"occurred_at":    occurredAt,
 		"producer":       producer,
-		"event_type":     fmt.Sprintf("%s.%s", event.Category, event.Subcategory),
-		"schema_version": ActivitySchemaVersion,
+		"event_type":     eventType,
+		"schema_version": schemaVersion,
 		"correlation_id": meta["correlation_id"],
 		"ip_address":     ipAddress,
 		"timestamp":      timestamp,
@@ -228,8 +288,15 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 		"new_code":       meta["new_code"],
 		"filename":       filename,
 		"lu_broker_id":   luBrokerID,
-		"metadata":       sanitizedMeta,
 	}
+
+	// Actually omit metadata key from the document when empty or redundant,
+	// preserving the monolith's 100% flat schema in MongoDB.
+	if sanitizedMeta != nil {
+		doc["metadata"] = sanitizedMeta
+	}
+
+	return doc
 }
 
 // topLevelMetaKeys is the set of metadata keys that are already promoted to

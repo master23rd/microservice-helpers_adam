@@ -126,7 +126,9 @@ func TestBuildActivityDocument_MetadataSanitized_AllRedundant(t *testing.T) {
 
 	doc := activity.BuildActivityDocument(event, "auth")
 
-	// metadata should be nil — all keys were redundant
+	// metadata should be omitted completely from document when all keys are redundant
+	_, exists := doc["metadata"]
+	assert.False(t, exists, "expected metadata key to be omitted completely from document")
 	assert.Nil(t, doc["metadata"],
 		"expected metadata to be nil when all keys are top-level duplicates")
 }
@@ -169,4 +171,142 @@ func TestBuildActivityDocument_MetadataSanitized_ContextualKeysPreserved(t *test
 	assert.Nil(t, cleaned["user_type"])
 	assert.Nil(t, cleaned["actor_name"])
 	assert.Nil(t, cleaned["actor_email"])
+}
+
+// TestEnrichActivityEvent_NullMetadata verifies that decoding JSON literal "null"
+// does not reset map to nil and cause panic when defaults are assigned.
+func TestEnrichActivityEvent_NullMetadata(t *testing.T) {
+	nullMeta := "null"
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		Metadata:    &nullMeta,
+	}
+
+	assert.NotPanics(t, func() {
+		activity.EnrichActivityEvent(&event, "test-producer")
+	})
+	assert.NotNil(t, event.Metadata)
+	assert.NotEqual(t, "null", *event.Metadata)
+}
+
+// TestBuildActivityDocument_NullMetadata verifies that BuildActivityDocument handles
+// Metadata pointing to "null" without panicking.
+func TestBuildActivityDocument_NullMetadata(t *testing.T) {
+	nullMeta := "null"
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		Metadata:    &nullMeta,
+	}
+
+	var doc map[string]any
+	assert.NotPanics(t, func() {
+		doc = activity.BuildActivityDocument(event)
+	})
+	assert.NotNil(t, doc)
+	assert.NotEmpty(t, doc["event_id"])
+	_, exists := doc["metadata"]
+	assert.False(t, exists, "metadata should be omitted")
+}
+
+// TestBuildActivityDocument_DeterministicEventIDAcrossRedeliveries verifies that
+// when an event lacks a metadata event_id, redeliveries of the identical event
+// generate the exact same event_id so deduplication works properly.
+func TestBuildActivityDocument_DeterministicEventIDAcrossRedeliveries(t *testing.T) {
+	createdAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	event := pubsubtypes.ActivityEvent{
+		Category:    "ORDER",
+		Subcategory: "SUBMIT",
+		UserID:      "user-redelivery-test",
+		Message:     "Order submitted for ABCD",
+		CreatedAt:   createdAt,
+	}
+
+	doc1 := activity.BuildActivityDocument(event, "order-service")
+	doc2 := activity.BuildActivityDocument(event, "order-service")
+
+	assert.NotEmpty(t, doc1["event_id"])
+	assert.NotEmpty(t, doc2["event_id"])
+	assert.Equal(t, doc1["event_id"], doc2["event_id"],
+		"event_id must be deterministic across redeliveries of the same event")
+}
+
+// TestBuildActivityDocument_UntimestampedEventReceivesUniqueIDs verifies that when an event
+// lacks an occurrence timestamp (CreatedAt zero, no occurred_at, no timestamp) and no event_id,
+// separate calls receive unique IDs so distinct recurring occurrences (such as periodic heartbeats)
+// are not treated as duplicate redeliveries and discarded.
+func TestBuildActivityDocument_UntimestampedEventReceivesUniqueIDs(t *testing.T) {
+	event := pubsubtypes.ActivityEvent{
+		Category:    "SYSTEM",
+		Subcategory: "HEARTBEAT",
+		UserID:      "sys-1",
+		Message:     "ping",
+		// CreatedAt left as time.Time{} (zero)
+	}
+
+	doc1 := activity.BuildActivityDocument(event)
+	doc2 := activity.BuildActivityDocument(event)
+
+	assert.NotEmpty(t, doc1["event_id"])
+	assert.NotEmpty(t, doc2["event_id"])
+	assert.NotEqual(t, doc1["event_id"], doc2["event_id"],
+		"distinct untimestamped occurrences must receive unique IDs to prevent dropping subsequent events")
+}
+
+// TestBuildActivityDocument_DeterministicEventIDFromOccurredAt verifies that when
+// metadata contains an occurrence timestamp, redeliveries of that occurrence produce
+// identical event IDs even if event.CreatedAt was not set on the struct.
+func TestBuildActivityDocument_DeterministicEventIDFromOccurredAt(t *testing.T) {
+	metaJSON := `{"occurred_at":"2026-10-20T10:00:00.000000000Z"}`
+	event := pubsubtypes.ActivityEvent{
+		Category:    "ORDER",
+		Subcategory: "SUBMIT",
+		UserID:      "user-occurred-test",
+		Message:     "Order submitted for ABCD",
+		Metadata:    &metaJSON,
+	}
+
+	doc1 := activity.BuildActivityDocument(event, "order-service")
+	doc2 := activity.BuildActivityDocument(event, "order-service")
+
+	assert.NotEmpty(t, doc1["event_id"])
+	assert.NotEmpty(t, doc2["event_id"])
+	assert.Equal(t, doc1["event_id"], doc2["event_id"],
+		"event_id must be deterministic across redeliveries when occurrence timestamp is supplied")
+}
+
+// TestBuildActivityDocument_PreservesSuppliedEnvelopeMetadata verifies that when metadata
+// contains occurred_at, event_type, or schema_version, they are preserved and promoted to
+// the top-level document rather than being overwritten by derived defaults.
+func TestBuildActivityDocument_PreservesSuppliedEnvelopeMetadata(t *testing.T) {
+	metaJSON := `{
+		"occurred_at": "2026-05-01T08:30:00.123456789Z",
+		"event_type": "CUSTOM.OVERRIDE_TYPE",
+		"schema_version": "2.5",
+		"producer": "custom-producer"
+	}`
+
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		UserID:      "user-envelope",
+		Message:     "Login event",
+		Metadata:    &metaJSON,
+		// CreatedAt zero to verify occurred_at is used as timestamp source
+	}
+
+	doc := activity.BuildActivityDocument(event, "default-producer")
+
+	assert.Equal(t, "2026-05-01T08:30:00.123456789Z", doc["occurred_at"])
+	assert.Equal(t, "CUSTOM.OVERRIDE_TYPE", doc["event_type"])
+	assert.Equal(t, "2.5", doc["schema_version"])
+	assert.Equal(t, "custom-producer", doc["producer"])
+
+	// created_at should accurately parse the supplied occurred_at timestamp
+	createdAt, ok := doc["created_at"].(time.Time)
+	assert.True(t, ok, "created_at must be time.Time")
+	assert.Equal(t, 2026, createdAt.Year())
+	assert.Equal(t, time.May, createdAt.Month())
+	assert.Equal(t, 1, createdAt.Day())
 }
