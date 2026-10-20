@@ -1,6 +1,11 @@
 package web
 
 import (
+	"errors"
+	"log"
+	"net/http"
+	"strconv"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/radian-solusi/microservice-helpers/validate"
@@ -18,6 +23,7 @@ const (
 	MethodNotAllowed    = 405
 	Conflict            = 409
 	ValidationError     = 422
+	PayloadTooLarge     = 413
 	TooManyRequest      = 429
 	InternalServerError = 500
 	ServiceBroken       = 502
@@ -59,6 +65,7 @@ func ErrorResponse(ctx *gin.Context, code int, message string) {
 	if code == WrongCredential {
 		code = Unauthorized
 	}
+	logErrorResponse(ctx, code, message)
 	SendResponse(ctx, ResponseDefault{Status: false, Code: code, Data: nil, Message: message})
 	ctx.Abort()
 }
@@ -72,16 +79,54 @@ func ValidationErrorResponse(ctx *gin.Context, err error) {
 
 // ValidationErrorResponseWithRef is ValidationErrorResponse with the bound
 // request struct as ref, so field paths honour its json/form tags and
-// embedded-struct flattening.
+// embedded-struct flattening. A body cut short by http.MaxBytesReader
+// (err wraps *http.MaxBytesError) is reported as 413 naming the limit,
+// instead of falling into the generic 422 "Invalid input data".
 func ValidationErrorResponseWithRef(ctx *gin.Context, err error, ref any) {
+	if maxBytesLimit, ok := maxBytesLimitFromError(err); ok {
+		PayloadTooLargeResponse(ctx, maxBytesLimit)
+		return
+	}
 	lang := GetLanguageCtx(ctx)
 	data := validate.FormatValidationErrorDataWithRef(err, lang, ref)
+	logValidationError(ctx, err)
 	SendResponse(ctx, ResponseDefault{
 		Status:  false,
 		Code:    ValidationError,
 		Data:    data,
 		Message: validate.FormatValidationSummary(err, lang),
 	})
+	ctx.Abort()
+}
+
+// maxBytesLimitFromError reports the configured limit when err wraps
+// *http.MaxBytesError, so callers can send PayloadTooLargeResponse instead
+// of the generic validation-error fallback.
+func maxBytesLimitFromError(err error) (int64, bool) {
+	var maxBytesErr *http.MaxBytesError
+	if !errors.As(err, &maxBytesErr) {
+		return 0, false
+	}
+	return maxBytesErr.Limit, true
+}
+
+// IsMaxBytesError reports whether err (or its cause) is the stdlib
+// http.MaxBytesReader overflow error, so callers can tell a too-large
+// request body apart from an ordinary bind/validation failure.
+func IsMaxBytesError(err error) bool {
+	_, ok := maxBytesLimitFromError(err)
+	return ok
+}
+
+// PayloadTooLargeResponse sends a 413 naming the configured limit in MB, for
+// requests whose body was cut short by http.MaxBytesReader. limitBytes is
+// the limit that was configured on the reader.
+func PayloadTooLargeResponse(ctx *gin.Context, limitBytes int64) {
+	lang := GetLanguageCtx(ctx)
+	limitMB := strconv.FormatFloat(float64(limitBytes)/(1024*1024), 'f', -1, 64)
+	message := validate.Translate("payload_too_large", lang, "", limitMB)
+	logErrorResponse(ctx, PayloadTooLarge, message)
+	SendResponse(ctx, ResponseDefault{Status: false, Code: PayloadTooLarge, Data: nil, Message: message})
 	ctx.Abort()
 }
 
@@ -95,4 +140,46 @@ func HandleErrorResponse(ctx *gin.Context, err error, mapper ErrorCodeMapper) {
 		}
 	}
 	ErrorResponse(ctx, code, err.Error())
+}
+
+// logErrorResponse writes one log line for every error response (4xx/5xx):
+// method, path, status, message. No response-body/contract change — this is
+// observability only. Never pass request bodies or headers here (secrets).
+func logErrorResponse(ctx *gin.Context, code int, message string) {
+	method, path := "", ""
+	if ctx != nil && ctx.Request != nil {
+		method = ctx.Request.Method
+		if ctx.Request.URL != nil {
+			path = ctx.Request.URL.Path
+		}
+	}
+	log.Printf("error_response method=%s path=%s status=%d message=%q", method, path, code, message)
+}
+
+// logValidationError logs the field-level breakdown (field/rule/param) when
+// err maps to validator.ValidationErrors/*AppValidationError, otherwise logs
+// the raw err.Error() so a non-field-level cause (e.g. JSON unmarshal/bind
+// errors) is never silently reduced to the generic "Invalid input data"
+// fallback without a trace.
+func logValidationError(ctx *gin.Context, err error) {
+	if err == nil {
+		logErrorResponse(ctx, ValidationError, "")
+		return
+	}
+	fields := validate.CollectFieldErrors(err)
+	if len(fields) == 0 {
+		logErrorResponse(ctx, ValidationError, "unrecognized bind/validation error: "+err.Error())
+		return
+	}
+	method, path := "", ""
+	if ctx != nil && ctx.Request != nil {
+		method = ctx.Request.Method
+		if ctx.Request.URL != nil {
+			path = ctx.Request.URL.Path
+		}
+	}
+	for _, fe := range fields {
+		log.Printf("error_response method=%s path=%s status=%d field=%s rule=%s param=%q",
+			method, path, ValidationError, fe.Field, fe.Tag, fe.Param)
+	}
 }

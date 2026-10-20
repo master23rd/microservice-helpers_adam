@@ -9,6 +9,8 @@
   "lt": "{0} must be less than {1}",
   "lte": "{0} must be less than or equal to {1}",
   "oneof": "{0} must be one of: {1}",
+  "alphanumeric_space": "{0} must contain only letters, numbers, and spaces",
+  "alphanumeric": "{0} must contain only letters and numbers",
   "numeric": "{0} must be numeric",
   "datetime": "{0} is not a valid date/time",
   "eqfield": "{0} must match {1}",
@@ -19,5 +21,6 @@
   "file_type_not_allowed": "{0} must be one of the following types: {1}",
   "file_read_error": "{0} could not be read",
   "_error": "{0} is invalid",
-  "invalid_input": "Invalid input data"
+  "invalid_input": "Invalid input data",
+  "payload_too_large": "Request body exceeds the {1}MB limit"
 }
