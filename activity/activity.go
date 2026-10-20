@@ -91,7 +91,13 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 		meta = make(map[string]any)
 	}
 
+	producer := MetaString(meta, "producer")
+	if producer == "" {
+		producer = producerDefault
+	}
+
 	occurredAt := MetaString(meta, "occurred_at")
+	timestamp := MetaString(meta, "timestamp")
 
 	createdAt := event.CreatedAt
 	if createdAt.IsZero() {
@@ -102,6 +108,17 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 				createdAt = t
 			}
 		}
+		// If occurred_at was absent or couldn't be parsed, parse legacy timestamp
+		// to preserve historical occurrence dates for backfilled/delayed events.
+		if createdAt.IsZero() && timestamp != "" {
+			if t, err := time.Parse("2006-01-02 15:04:05", timestamp); err == nil {
+				createdAt = t
+			} else if t, err := time.Parse(time.RFC3339, timestamp); err == nil {
+				createdAt = t
+			} else if t, err := time.Parse("2006-01-02", timestamp); err == nil {
+				createdAt = t
+			}
+		}
 	}
 	if createdAt.IsZero() {
 		createdAt = time.Now()
@@ -109,6 +126,9 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 
 	if occurredAt == "" {
 		occurredAt = createdAt.UTC().Format(time.RFC3339Nano)
+	}
+	if timestamp == "" {
+		timestamp = createdAt.Format("2006-01-02 15:04:05")
 	}
 
 	eventID := MetaString(meta, "event_id")
@@ -127,7 +147,9 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 		}
 
 		if timeKey != "" {
-			identity := fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+			// Include resolved producer so identical events from different producers receive distinct IDs
+			identity := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
+				producer,
 				event.Category,
 				event.Subcategory,
 				event.UserID,
@@ -229,16 +251,6 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 		luBrokerID = v
 	} else if v, ok := meta["broker_id"]; ok && v != nil && v != "" {
 		luBrokerID = v
-	}
-
-	timestamp := MetaString(meta, "timestamp")
-	if timestamp == "" {
-		timestamp = createdAt.Format("2006-01-02 15:04:05")
-	}
-
-	producer := MetaString(meta, "producer")
-	if producer == "" {
-		producer = producerDefault
 	}
 
 	// sanitizedMeta strips every key that is already represented as a dedicated

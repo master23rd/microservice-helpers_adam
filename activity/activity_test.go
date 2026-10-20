@@ -310,3 +310,53 @@ func TestBuildActivityDocument_PreservesSuppliedEnvelopeMetadata(t *testing.T) {
 	assert.Equal(t, time.May, createdAt.Month())
 	assert.Equal(t, 1, createdAt.Day())
 }
+
+// TestBuildActivityDocument_LegacyTimestampOccurrenceTime verifies that when CreatedAt is zero
+// and metadata contains a legacy timestamp but not occurred_at, that legacy timestamp is parsed
+// and used as the occurrence time for created_at and occurred_at, avoiding contradictory dates.
+func TestBuildActivityDocument_LegacyTimestampOccurrenceTime(t *testing.T) {
+	metaJSON := `{"timestamp":"2025-06-15 14:30:00"}`
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		UserID:      "historical-user",
+		Message:     "Historical backfilled login",
+		Metadata:    &metaJSON,
+		// CreatedAt zero to simulate backfill/delayed event without struct timestamp
+	}
+
+	doc := activity.BuildActivityDocument(event, "auth-service")
+
+	assert.Equal(t, "2025-06-15 14:30:00", doc["timestamp"])
+	assert.Equal(t, "2025-06-15T14:30:00Z", doc["occurred_at"])
+
+	createdAt, ok := doc["created_at"].(time.Time)
+	assert.True(t, ok, "created_at must be time.Time")
+	assert.Equal(t, 2025, createdAt.Year())
+	assert.Equal(t, time.June, createdAt.Month())
+	assert.Equal(t, 15, createdAt.Day())
+	assert.Equal(t, 14, createdAt.Hour())
+	assert.Equal(t, 30, createdAt.Minute())
+}
+
+// TestBuildActivityDocument_ProducerIncludedInDeterministicEventID verifies that when
+// two different producer services emit otherwise identical timestamped events, their
+// resolved producer values ensure each event receives a distinct event_id.
+func TestBuildActivityDocument_ProducerIncludedInDeterministicEventID(t *testing.T) {
+	createdAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	event := pubsubtypes.ActivityEvent{
+		Category:    "NOTIF",
+		Subcategory: "SEND",
+		UserID:      "common-user",
+		Message:     "Notification sent",
+		CreatedAt:   createdAt,
+	}
+
+	docAuth := activity.BuildActivityDocument(event, "auth-service")
+	docNotif := activity.BuildActivityDocument(event, "notification-service")
+
+	assert.NotEmpty(t, docAuth["event_id"])
+	assert.NotEmpty(t, docNotif["event_id"])
+	assert.NotEqual(t, docAuth["event_id"], docNotif["event_id"],
+		"events from different producers must receive different event_ids to prevent discarding legitimate events")
+}
