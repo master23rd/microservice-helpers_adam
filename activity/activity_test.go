@@ -126,7 +126,9 @@ func TestBuildActivityDocument_MetadataSanitized_AllRedundant(t *testing.T) {
 
 	doc := activity.BuildActivityDocument(event, "auth")
 
-	// metadata should be nil — all keys were redundant
+	// metadata should be omitted completely from document when all keys are redundant
+	_, exists := doc["metadata"]
+	assert.False(t, exists, "expected metadata key to be omitted completely from document")
 	assert.Nil(t, doc["metadata"],
 		"expected metadata to be nil when all keys are top-level duplicates")
 }
@@ -169,4 +171,63 @@ func TestBuildActivityDocument_MetadataSanitized_ContextualKeysPreserved(t *test
 	assert.Nil(t, cleaned["user_type"])
 	assert.Nil(t, cleaned["actor_name"])
 	assert.Nil(t, cleaned["actor_email"])
+}
+
+// TestEnrichActivityEvent_NullMetadata verifies that decoding JSON literal "null"
+// does not reset map to nil and cause panic when defaults are assigned.
+func TestEnrichActivityEvent_NullMetadata(t *testing.T) {
+	nullMeta := "null"
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		Metadata:    &nullMeta,
+	}
+
+	assert.NotPanics(t, func() {
+		activity.EnrichActivityEvent(&event, "test-producer")
+	})
+	assert.NotNil(t, event.Metadata)
+	assert.NotEqual(t, "null", *event.Metadata)
+}
+
+// TestBuildActivityDocument_NullMetadata verifies that BuildActivityDocument handles
+// Metadata pointing to "null" without panicking.
+func TestBuildActivityDocument_NullMetadata(t *testing.T) {
+	nullMeta := "null"
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		Metadata:    &nullMeta,
+	}
+
+	var doc map[string]any
+	assert.NotPanics(t, func() {
+		doc = activity.BuildActivityDocument(event)
+	})
+	assert.NotNil(t, doc)
+	assert.NotEmpty(t, doc["event_id"])
+	_, exists := doc["metadata"]
+	assert.False(t, exists, "metadata should be omitted")
+}
+
+// TestBuildActivityDocument_DeterministicEventIDAcrossRedeliveries verifies that
+// when an event lacks a metadata event_id, redeliveries of the identical event
+// generate the exact same event_id so deduplication works properly.
+func TestBuildActivityDocument_DeterministicEventIDAcrossRedeliveries(t *testing.T) {
+	createdAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	event := pubsubtypes.ActivityEvent{
+		Category:    "ORDER",
+		Subcategory: "SUBMIT",
+		UserID:      "user-redelivery-test",
+		Message:     "Order submitted for ABCD",
+		CreatedAt:   createdAt,
+	}
+
+	doc1 := activity.BuildActivityDocument(event, "order-service")
+	doc2 := activity.BuildActivityDocument(event, "order-service")
+
+	assert.NotEmpty(t, doc1["event_id"])
+	assert.NotEmpty(t, doc2["event_id"])
+	assert.Equal(t, doc1["event_id"], doc2["event_id"],
+		"event_id must be deterministic across redeliveries of the same event")
 }
