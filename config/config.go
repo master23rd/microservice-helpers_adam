@@ -1,5 +1,10 @@
 package config
 
+import (
+	"os"
+	"strconv"
+)
+
 type DBType string
 
 const (
@@ -84,6 +89,9 @@ const DefaultMaxUploadSizeMB = 50
 
 type AppConfig struct {
 	AppKey string `toml:"app_key"`
+	// RbacMode is the endpoint-RBAC enforcement mode: "enforce" (default) or
+	// "shadow" (allow but log would-be denials). RBAC_MODE env overrides it.
+	RbacMode string `toml:"rbac_mode"`
 	// LegacyAppKey is the e-IPO (PHP) secretKey used for data encrypted outside
 	// the Go stack. Kept separate from AppKey, which signs tokens and must not change.
 	LegacyAppKey     string `toml:"legacy_app_key"`
@@ -109,6 +117,26 @@ func (c AppConfig) MaxUploadBytes() int64 {
 		mb = DefaultMaxUploadSizeMB
 	}
 	return int64(mb) * 1024 * 1024
+}
+
+// RBACShadow reports whether the RBAC middleware should log would-be denials
+// and allow the request (shadow) instead of enforcing. The RBAC_MODE
+// environment variable overrides rbac_mode; unset means "enforce". An unknown
+// value panics so a typo fails at startup instead of silently weakening or
+// strengthening enforcement.
+func (c AppConfig) RBACShadow() bool {
+	mode := os.Getenv("RBAC_MODE")
+	if mode == "" {
+		mode = c.RbacMode
+	}
+	switch mode {
+	case "", "enforce":
+		return false
+	case "shadow":
+		return true
+	default:
+		panic("config: unknown rbac_mode " + strconv.Quote(mode) + ` (want "enforce" or "shadow")`)
+	}
 }
 
 type MongoDBConfig struct {
