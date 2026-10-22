@@ -22,7 +22,7 @@ type rbacAdminPrivileges struct {
 }
 
 type rbacSessionPayload struct {
-	UserRelatedID   string              `json:"user_related_id"`
+	UserRelatedID   any                 `json:"user_related_id"` // int64 in go-models; string in some test fixtures
 	Scope           []ScopeAccess       `json:"scope"`
 	AdminPrivileges rbacAdminPrivileges `json:"admin_privileges"`
 }
@@ -63,7 +63,7 @@ func RBAC(cfg RBACConfig) gin.HandlerFunc {
 		}
 
 		if cfg.Shadow {
-			logf("rbac shadow-deny service=%s method=%s path=%s user_related_id=%s",
+			logf("rbac shadow-deny service=%s method=%s path=%s user_related_id=%v",
 				cfg.ServiceCode, c.Request.Method, fullPath, payload.UserRelatedID)
 			c.Next()
 			return
