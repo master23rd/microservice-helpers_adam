@@ -272,8 +272,8 @@ func TestBuildActivityDocument_NullMetadata(t *testing.T) {
 }
 
 // TestBuildActivityDocument_DeterministicEventIDAcrossRedeliveries verifies that
-// when an event lacks a metadata event_id, redeliveries of the identical event
-// generate the exact same event_id so deduplication works properly.
+// when an event lacks a metadata event_id but HAS a stable timestamp, redeliveries of
+// the identical event generate the exact same event_id so deduplication works properly.
 func TestBuildActivityDocument_DeterministicEventIDAcrossRedeliveries(t *testing.T) {
 	createdAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
 	event := pubsubtypes.ActivityEvent{
@@ -291,4 +291,48 @@ func TestBuildActivityDocument_DeterministicEventIDAcrossRedeliveries(t *testing
 	assert.NotEmpty(t, doc2["event_id"])
 	assert.Equal(t, doc1["event_id"], doc2["event_id"],
 		"event_id must be deterministic across redeliveries of the same event")
+}
+
+// TestBuildActivityDocument_StableFallbackEventIDWithoutTimestamp verifies that when
+// an event has no CreatedAt and no occurred_at (forcing a time.Now() fallback),
+// the generated event_id remains consistent across redeliveries because time.Now()
+// is intentionally excluded from the hash in this scenario.
+func TestBuildActivityDocument_StableFallbackEventIDWithoutTimestamp(t *testing.T) {
+	// Simulate an un-enriched event with no timestamp at all.
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		UserID:      "user-no-ts",
+		Message:     "Login from unknown time",
+		// CreatedAt is zero, no Metadata → falls back to time.Now() internally
+	}
+
+	doc1 := activity.BuildActivityDocument(event, "auth-service")
+	// A short sleep to ensure time.Now() would differ if it were included in the hash.
+	time.Sleep(2 * time.Millisecond)
+	doc2 := activity.BuildActivityDocument(event, "auth-service")
+
+	assert.Equal(t, doc1["event_id"], doc2["event_id"],
+		"event_id must be stable even when no timestamp is available (time.Now() must NOT be hashed)")
+}
+
+// TestBuildActivityDocument_DistinctEventIDsForDifferentProducers verifies that two
+// events that share Category, Subcategory, UserID, Message, and timestamp but come
+// from different producers receive distinct event IDs so neither masks the other
+// during downstream deduplication.
+func TestBuildActivityDocument_DistinctEventIDsForDifferentProducers(t *testing.T) {
+	createdAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	base := pubsubtypes.ActivityEvent{
+		Category:    "ORDER",
+		Subcategory: "SUBMIT",
+		UserID:      "shared-user",
+		Message:     "Order submitted",
+		CreatedAt:   createdAt,
+	}
+
+	docA := activity.BuildActivityDocument(base, "service-A")
+	docB := activity.BuildActivityDocument(base, "service-B")
+
+	assert.NotEqual(t, docA["event_id"], docB["event_id"],
+		"events from different producers must get distinct event_ids")
 }

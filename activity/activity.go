@@ -92,13 +92,20 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 
 	createdAt := event.CreatedAt
 	occurredAt := MetaString(meta, "occurred_at")
-	if occurredAt != "" {
-		if createdAt.IsZero() {
-			if t, err := time.Parse(time.RFC3339Nano, occurredAt); err == nil {
-				createdAt = t
-			} else if t, err := time.Parse(time.RFC3339, occurredAt); err == nil {
-				createdAt = t
-			}
+
+	// hasStableTime tracks whether the timestamp originates from a reliable source
+	// (i.e. the producer-stamped event.CreatedAt or a parsed occurred_at from metadata).
+	// When both are absent we fall back to time.Now(), which is NOT stable across
+	// redeliveries and must therefore be excluded from the deterministic event_id hash.
+	hasStableTime := !createdAt.IsZero()
+
+	if occurredAt != "" && createdAt.IsZero() {
+		if t, err := time.Parse(time.RFC3339Nano, occurredAt); err == nil {
+			createdAt = t
+			hasStableTime = true
+		} else if t, err := time.Parse(time.RFC3339, occurredAt); err == nil {
+			createdAt = t
+			hasStableTime = true
 		}
 	}
 	if createdAt.IsZero() {
@@ -118,17 +125,51 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 		schemaVersion = ActivitySchemaVersion
 	}
 
+	producer := MetaString(meta, "producer")
+	if producer == "" {
+		producer = producerDefault
+	}
+
 	eventID := MetaString(meta, "event_id")
 	if eventID == "" {
-		// Generate deterministic UUIDv5 (SHA-1) derived from stable event identity
-		// attributes so redeliveries of the same event produce identical deduplication keys.
-		identity := fmt.Sprintf("%s|%s|%s|%d|%s",
-			event.Category,
-			event.Subcategory,
-			event.UserID,
-			createdAt.UTC().UnixNano(),
-			event.Message,
-		)
+		// Build a deterministic UUIDv5 identity from stable, distinguishing fields.
+		//
+		// Rules:
+		//  - Always include Category, Subcategory, UserID, Message and producer to
+		//    separate events from distinct services that otherwise look identical.
+		//  - Include the timestamp (UnixNano) ONLY when it originates from a reliable
+		//    source (event.CreatedAt or a parsed occurred_at). When we had to fall back
+		//    to time.Now(), the timestamp changes on every redelivery and would break
+		//    deduplication – so we omit it from the hash in that case.
+		//  - Include correlation_id when present; it naturally distinguishes concurrent
+		//    flows that share every other field (e.g. two simultaneous batch orders).
+		var identity string
+		correlationID := MetaString(meta, "correlation_id")
+		if hasStableTime {
+			identity = fmt.Sprintf("%s|%s|%s|%d|%s|%s|%s",
+				event.Category,
+				event.Subcategory,
+				event.UserID,
+				createdAt.UTC().UnixNano(),
+				event.Message,
+				producer,
+				correlationID,
+			)
+		} else {
+			// No stable time – rely on all other distinguishing dimensions.
+			// Note: without a timestamp two genuinely distinct events that share all
+			// other fields will collide; however this degenerate case (no CreatedAt,
+			// no occurred_at, no pre-assigned event_id) should never occur when
+			// publishers properly call EnrichActivityEvent before publishing.
+			identity = fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+				event.Category,
+				event.Subcategory,
+				event.UserID,
+				event.Message,
+				producer,
+				correlationID,
+			)
+		}
 		eventID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()
 	}
 
@@ -222,11 +263,6 @@ func BuildActivityDocument(event pubsubtypes.ActivityEvent, defaultProducer ...s
 	timestamp := MetaString(meta, "timestamp")
 	if timestamp == "" {
 		timestamp = createdAt.Format("2006-01-02 15:04:05")
-	}
-
-	producer := MetaString(meta, "producer")
-	if producer == "" {
-		producer = producerDefault
 	}
 
 	// sanitizedMeta strips every key that is already represented as a dedicated
