@@ -10,11 +10,12 @@ type ResponseDefault struct {
 }
 
 type ScopeAccess struct {
-	Name       string `json:"feature_name"`
-	Permission string `json:"permission"`
-	IsAllowed  bool   `json:"is_allowed"`
-	Method     string `json:"method"`
-	URL        string `json:"url"`
+	Name        string `json:"feature_name"`
+	Permission  string `json:"permission"`
+	IsAllowed   bool   `json:"is_allowed"`
+	Method      string `json:"method"`
+	URL         string `json:"url"`
+	ServiceCode string `json:"service_code"`
 }
 
 type PayloadAuthorization struct {

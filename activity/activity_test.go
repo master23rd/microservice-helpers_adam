@@ -2,6 +2,7 @@ package activity_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -126,7 +127,9 @@ func TestBuildActivityDocument_MetadataSanitized_AllRedundant(t *testing.T) {
 
 	doc := activity.BuildActivityDocument(event, "auth")
 
-	// metadata should be nil — all keys were redundant
+	// metadata should be omitted completely from document when all keys are redundant
+	_, exists := doc["metadata"]
+	assert.False(t, exists, "expected metadata key to be omitted completely from document")
 	assert.Nil(t, doc["metadata"],
 		"expected metadata to be nil when all keys are top-level duplicates")
 }
@@ -169,4 +172,123 @@ func TestBuildActivityDocument_MetadataSanitized_ContextualKeysPreserved(t *test
 	assert.Nil(t, cleaned["user_type"])
 	assert.Nil(t, cleaned["actor_name"])
 	assert.Nil(t, cleaned["actor_email"])
+}
+
+// TestBuildActivityDocument_PreservesSuppliedEnvelopeFields verifies that when
+// metadata supplies occurred_at, event_type, or schema_version, those are preserved
+// instead of being unconditionally replaced by derived defaults.
+func TestBuildActivityDocument_PreservesSuppliedEnvelopeFields(t *testing.T) {
+	customOccurred := "2026-03-01T14:20:30.123456789Z"
+	customEventType := "CUSTOM.EVENT.TYPE"
+	customSchemaVer := "2.1"
+	customProducer := "custom-service-origin"
+	customEventID := "custom-uuid-456"
+
+	metaJSON := fmt.Sprintf(`{
+		"occurred_at": "%s",
+		"event_type": "%s",
+		"schema_version": "%s",
+		"producer": "%s",
+		"event_id": "%s"
+	}`, customOccurred, customEventType, customSchemaVer, customProducer, customEventID)
+
+	event := pubsubtypes.ActivityEvent{
+		Category:    "FALLBACK_CAT",
+		Subcategory: "FALLBACK_SUBCAT",
+		UserID:      "user-envelope",
+		Message:     "Envelope preservation test",
+		Metadata:    &metaJSON,
+	}
+
+	doc := activity.BuildActivityDocument(event, "default-producer")
+
+	assert.Equal(t, customOccurred, doc["occurred_at"])
+	assert.Equal(t, customEventType, doc["event_type"])
+	assert.Equal(t, customSchemaVer, doc["schema_version"])
+	assert.Equal(t, customProducer, doc["producer"])
+	assert.Equal(t, customEventID, doc["event_id"])
+}
+
+// TestBuildActivityDocument_ZeroCreatedAtWithSuppliedOccurredAt verifies that
+// an event with zero CreatedAt but supplied occurred_at parses the true occurrence
+// time into created_at rather than defaulting to time.Now() (processing time).
+func TestBuildActivityDocument_ZeroCreatedAtWithSuppliedOccurredAt(t *testing.T) {
+	historicalTimeStr := "2026-01-15T08:30:00Z"
+	metaJSON := fmt.Sprintf(`{"occurred_at":"%s"}`, historicalTimeStr)
+
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		UserID:      "user-hist",
+		Message:     "Historical event",
+		Metadata:    &metaJSON,
+		// CreatedAt is intentionally zero
+	}
+
+	doc := activity.BuildActivityDocument(event, "auth")
+
+	assert.Equal(t, historicalTimeStr, doc["occurred_at"])
+	createdAt, ok := doc["created_at"].(time.Time)
+	assert.True(t, ok)
+	expectedTime, _ := time.Parse(time.RFC3339, historicalTimeStr)
+	assert.True(t, createdAt.Equal(expectedTime), "created_at should preserve historical occurrence time")
+}
+
+// TestEnrichActivityEvent_NullMetadata verifies that decoding JSON literal "null"
+// does not reset map to nil and cause panic when defaults are assigned.
+func TestEnrichActivityEvent_NullMetadata(t *testing.T) {
+	nullMeta := "null"
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		Metadata:    &nullMeta,
+	}
+
+	assert.NotPanics(t, func() {
+		activity.EnrichActivityEvent(&event, "test-producer")
+	})
+	assert.NotNil(t, event.Metadata)
+	assert.NotEqual(t, "null", *event.Metadata)
+}
+
+// TestBuildActivityDocument_NullMetadata verifies that BuildActivityDocument handles
+// Metadata pointing to "null" without panicking.
+func TestBuildActivityDocument_NullMetadata(t *testing.T) {
+	nullMeta := "null"
+	event := pubsubtypes.ActivityEvent{
+		Category:    "AUTH",
+		Subcategory: "LOGIN",
+		Metadata:    &nullMeta,
+	}
+
+	var doc map[string]any
+	assert.NotPanics(t, func() {
+		doc = activity.BuildActivityDocument(event)
+	})
+	assert.NotNil(t, doc)
+	assert.NotEmpty(t, doc["event_id"])
+	_, exists := doc["metadata"]
+	assert.False(t, exists, "metadata should be omitted")
+}
+
+// TestBuildActivityDocument_DeterministicEventIDAcrossRedeliveries verifies that
+// when an event lacks a metadata event_id, redeliveries of the identical event
+// generate the exact same event_id so deduplication works properly.
+func TestBuildActivityDocument_DeterministicEventIDAcrossRedeliveries(t *testing.T) {
+	createdAt := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	event := pubsubtypes.ActivityEvent{
+		Category:    "ORDER",
+		Subcategory: "SUBMIT",
+		UserID:      "user-redelivery-test",
+		Message:     "Order submitted for ABCD",
+		CreatedAt:   createdAt,
+	}
+
+	doc1 := activity.BuildActivityDocument(event, "order-service")
+	doc2 := activity.BuildActivityDocument(event, "order-service")
+
+	assert.NotEmpty(t, doc1["event_id"])
+	assert.NotEmpty(t, doc2["event_id"])
+	assert.Equal(t, doc1["event_id"], doc2["event_id"],
+		"event_id must be deterministic across redeliveries of the same event")
 }
